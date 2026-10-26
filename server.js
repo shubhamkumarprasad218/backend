@@ -271,18 +271,18 @@ app.post("/calls/start", (req, res) => {
   }
 });
 
-// 7. GET /calls/active - Poll for active incoming or connected calls
-app.get("/calls/active", (req, res) => {
+// 7. GET /calls/active and /calls/active/:userId - Poll for active calls
+const handleActiveCall = (req, res) => {
   try {
-    const { userId } = req.query;
+    const userId = (req.query.userId || req.params.userId || "").toString().trim().toLowerCase();
     if (!userId) {
-      return res.status(400).json({ error: "userId parameter required" });
+      return res.status(400).json({ error: "userId required" });
     }
 
-    // Clean up stale calls older than 45s
+    // Clean up stale ringing calls older than 60s
     const now = Date.now();
     for (const [id, call] of activeCalls.entries()) {
-      if (call.status === "ringing" && now - (call.createdAt || 0) > 45000) {
+      if (call.status === "ringing" && now - (call.createdAt || 0) > 60000) {
         call.status = "ended";
         activeCalls.delete(id);
       }
@@ -290,8 +290,16 @@ app.get("/calls/active", (req, res) => {
 
     let userCall = null;
     for (const call of activeCalls.values()) {
+      const cReceiverId = (call.receiverId || "").toString().trim().toLowerCase();
+      const cCallerId = (call.callerId || "").toString().trim().toLowerCase();
+      const cReceiverPid = (call.receiverPersonalId || "").toString().trim().toLowerCase();
+      const cCallerPid = (call.callerPersonalId || "").toString().trim().toLowerCase();
+
       if (
-        (call.receiverId === userId || call.callerId === userId) &&
+        (cReceiverId === userId ||
+         cCallerId === userId ||
+         cReceiverPid === userId ||
+         cCallerPid === userId) &&
         (call.status === "ringing" || call.status === "connected")
       ) {
         userCall = call;
@@ -304,7 +312,10 @@ app.get("/calls/active", (req, res) => {
     console.error("Error getting active call:", err);
     res.status(500).json({ error: err.message });
   }
-});
+};
+
+app.get("/calls/active", handleActiveCall);
+app.get("/calls/active/:userId", handleActiveCall);
 
 // 8. POST /calls/answer - Answer an incoming call
 app.post("/calls/answer", (req, res) => {
@@ -345,7 +356,7 @@ app.post("/calls/end", (req, res) => {
       call.status = finalStatus;
       call.endedAt = Date.now();
       activeCalls.set(callId, call);
-      setTimeout(() => activeCalls.delete(callId), 6000);
+      setTimeout(() => activeCalls.delete(callId), 8000);
     }
 
     console.log(`📞 Call Terminated (${finalStatus}): ${callId}`);
@@ -366,12 +377,12 @@ app.get("/call-room/:callId/:role", (req, res) => {
 <html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ArtVerse Voice Room</title>
+  <title>ArtVerse Live Voice</title>
 </head>
 <body style="background:#0b1120;color:#fff;font-family:system-ui,sans-serif;margin:0;padding:20px;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
   <div style="text-align:center;">
-    <h3 style="margin:0 0 10px;color:#38bdf8;">ArtVerse Live Voice Channel</h3>
-    <p id="status" style="font-size:14px;color:#94a3b8;">Connecting secure audio...</p>
+    <h3 style="margin:0 0 10px;color:#38bdf8;">ArtVerse Voice Channel</h3>
+    <p id="status" style="font-size:14px;color:#94a3b8;">Connecting secure audio channel...</p>
     <audio id="remoteAudio" autoplay playsinline></audio>
   </div>
 
@@ -383,56 +394,74 @@ app.get("/call-room/:callId/:role", (req, res) => {
     const otherId = "${otherPeerId}";
     const isCaller = "${role}" === "caller";
 
+    let connected = false;
+    let callInterval = null;
+
     navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       video: false
     }).then(stream => {
-      statusEl.innerText = "Microphone connected. Linking voice...";
+      statusEl.innerText = "Microphone active. Connecting...";
 
       const peer = new Peer(myId, {
         config: {
           iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' }
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' }
           ]
         }
       });
 
+      function handleStream(remoteStream) {
+        if (connected) return;
+        connected = true;
+        if (callInterval) clearInterval(callInterval);
+        remoteAudio.srcObject = remoteStream;
+        remoteAudio.play().catch(e => console.log(e));
+        statusEl.innerText = "✓ Voice Connected! You can talk now.";
+      }
+
+      function attemptCall() {
+        if (connected) return;
+        try {
+          const call = peer.call(otherId, stream);
+          if (call) {
+            call.on('stream', handleStream);
+            call.on('error', e => console.warn(e));
+          }
+        } catch(e) {
+          console.warn(e);
+        }
+      }
+
       peer.on('open', () => {
-        statusEl.innerText = isCaller ? "Calling partner..." : "Ready. Answering voice...";
+        statusEl.innerText = isCaller ? "Connecting to partner..." : "Ready. Receiving call...";
 
         if (isCaller) {
-          let attempts = 0;
-          const interval = setInterval(() => {
-            attempts++;
-            const call = peer.call(otherId, stream);
-            if (call) {
-              call.on('stream', remoteStream => {
-                remoteAudio.srcObject = remoteStream;
-                remoteAudio.play().catch(e => console.log(e));
-                statusEl.innerText = "✓ Voice Connected! Speak now.";
-                clearInterval(interval);
-              });
+          attemptCall();
+          let count = 0;
+          callInterval = setInterval(() => {
+            count++;
+            if (!connected && count < 35) {
+              attemptCall();
+            } else {
+              clearInterval(callInterval);
             }
-            if (attempts > 30) clearInterval(interval);
           }, 1500);
         }
       });
 
       peer.on('call', call => {
         call.answer(stream);
-        call.on('stream', remoteStream => {
-          remoteAudio.srcObject = remoteStream;
-          remoteAudio.play().catch(e => console.log(e));
-          statusEl.innerText = "✓ Voice Connected! Speak now.";
-        });
+        call.on('stream', handleStream);
       });
 
       peer.on('error', err => {
         console.warn("PeerJS note:", err);
       });
     }).catch(err => {
-      statusEl.innerText = "Mic error: " + err.message;
+      statusEl.innerText = "Microphone note: " + err.message;
     });
   </script>
 </body>
