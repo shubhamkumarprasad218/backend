@@ -367,29 +367,69 @@ app.post("/calls/end", (req, res) => {
   }
 });
 
-// 10. GET /call-room/:callId/:role - WebRTC 2-Way Live Voice Audio Room
+// 10. GET /call-room/:callId/:role - WebRTC 2-Way Live Voice & Video Audio/Camera Room
 app.get("/call-room/:callId/:role", (req, res) => {
   const { callId, role } = req.params;
   const myPeerId = `artverse_${callId}_${role}`;
   const otherPeerId = `artverse_${callId}_${role === "caller" ? "receiver" : "caller"}`;
 
+  const call = activeCalls.get(callId);
+  const isVideo =
+    req.query.type === "video" ||
+    (call && call.callType === "video");
+
   res.send(`<!DOCTYPE html>
 <html>
 <head>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ArtVerse Live Voice</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>ArtVerse Live ${isVideo ? "Video" : "Voice"}</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      width: 100vw; height: 100vh;
+      overflow: hidden;
+      background: #030712;
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #fff;
+    }
+  </style>
 </head>
-<body style="background:#0b1120;color:#fff;font-family:system-ui,sans-serif;margin:0;padding:20px;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
-  <div style="text-align:center;">
+<body>
+  ${
+    isVideo
+      ? `
+  <div style="position:relative;width:100vw;height:100vh;background:#030712;overflow:hidden;">
+    <!-- REMOTE FULLSCREEN VIDEO (OTHER USER'S FACE) -->
+    <video id="remoteVideo" autoplay playsinline style="width:100%;height:100%;object-fit:cover;display:block;background:#0b1120;"></video>
+
+    <!-- LOCAL SELFIE PIP (MY FACE) -->
+    <div style="position:absolute;top:20px;right:16px;width:105px;height:150px;border-radius:14px;overflow:hidden;border:2px solid #38bdf8;box-shadow:0 8px 24px rgba(0,0,0,0.7);background:#1e293b;z-index:50;">
+      <video id="localVideo" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;transform:scaleX(-1);"></video>
+    </div>
+
+    <!-- STATUS OVERLAY -->
+    <div id="statusBadge" style="position:absolute;top:20px;left:16px;background:rgba(15,23,42,0.8);backdrop-filter:blur(8px);padding:6px 12px;border-radius:20px;border:1px solid rgba(56,189,248,0.3);display:flex;align-items:center;gap:6px;z-index:40;">
+      <span style="width:8px;height:8px;border-radius:50%;background:#10b981;"></span>
+      <span id="status" style="font-size:12px;color:#f8fafc;font-weight:600;">Connecting video feed...</span>
+    </div>
+  </div>
+  `
+      : `
+  <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;padding:20px;text-align:center;">
     <h3 style="margin:0 0 10px;color:#38bdf8;">ArtVerse Voice Channel</h3>
     <p id="status" style="font-size:14px;color:#94a3b8;">Connecting secure audio channel...</p>
     <audio id="remoteAudio" autoplay playsinline></audio>
   </div>
+  `
+  }
 
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script>
+    const isVideo = ${isVideo ? "true" : "false"};
     const statusEl = document.getElementById("status");
-    const remoteAudio = document.getElementById("remoteAudio");
+    const localVideo = document.getElementById("localVideo");
+    const remoteMedia = document.getElementById(isVideo ? "remoteVideo" : "remoteAudio");
     const myId = "${myPeerId}";
     const otherId = "${otherPeerId}";
     const isCaller = "${role}" === "caller";
@@ -397,84 +437,108 @@ app.get("/call-room/:callId/:role", (req, res) => {
     let connected = false;
     let callInterval = null;
 
-    navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      video: false
-    }).then(stream => {
-      window.localStream = stream;
-      statusEl.innerText = "Microphone active. Connecting...";
-
-      function handleMsg(e) {
-        try {
-          const d = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
-          if (d && d.type === "MUTE" && window.localStream) {
-            window.localStream.getAudioTracks().forEach(t => t.enabled = !d.muted);
-          }
-        } catch(err) {}
-      }
-      window.addEventListener("message", handleMsg);
-      document.addEventListener("message", handleMsg);
-
-      const peer = new Peer(myId, {
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' }
-          ]
+    const mediaConstraints = isVideo
+      ? {
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } }
         }
-      });
+      : {
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          video: false
+        };
 
-      function handleStream(remoteStream) {
-        if (connected) return;
-        connected = true;
-        if (callInterval) clearInterval(callInterval);
-        remoteAudio.srcObject = remoteStream;
-        remoteAudio.play().catch(e => console.log(e));
-        statusEl.innerText = "✓ Voice Connected! You can talk now.";
-      }
-
-      function attemptCall() {
-        if (connected) return;
-        try {
-          const call = peer.call(otherId, stream);
-          if (call) {
-            call.on('stream', handleStream);
-            call.on('error', e => console.warn(e));
-          }
-        } catch(e) {
-          console.warn(e);
+    function startStreaming(constraints) {
+      navigator.mediaDevices.getUserMedia(constraints).then(stream => {
+        window.localStream = stream;
+        if (localVideo) {
+          localVideo.srcObject = stream;
+          localVideo.play().catch(e => console.log(e));
         }
-      }
+        statusEl.innerText = isVideo ? "Camera active. Connecting..." : "Microphone active. Connecting...";
 
-      peer.on('open', () => {
-        statusEl.innerText = isCaller ? "Connecting to partner..." : "Ready. Receiving call...";
-
-        if (isCaller) {
-          attemptCall();
-          let count = 0;
-          callInterval = setInterval(() => {
-            count++;
-            if (!connected && count < 35) {
-              attemptCall();
-            } else {
-              clearInterval(callInterval);
+        function handleMsg(e) {
+          try {
+            const d = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
+            if (d && d.type === "MUTE" && window.localStream) {
+              window.localStream.getAudioTracks().forEach(t => t.enabled = !d.muted);
             }
-          }, 1500);
+            if (d && d.type === "TOGGLE_VIDEO" && window.localStream) {
+              window.localStream.getVideoTracks().forEach(t => t.enabled = !d.videoOff);
+            }
+          } catch(err) {}
+        }
+        window.addEventListener("message", handleMsg);
+        document.addEventListener("message", handleMsg);
+
+        const peer = new Peer(myId, {
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' }
+            ]
+          }
+        });
+
+        function handleStream(remoteStream) {
+          if (connected) return;
+          connected = true;
+          if (callInterval) clearInterval(callInterval);
+          remoteMedia.srcObject = remoteStream;
+          remoteMedia.play().catch(e => console.log(e));
+          statusEl.innerText = isVideo ? "✓ Live 2-Way Video Connected" : "✓ Voice Connected! You can talk now.";
+        }
+
+        function attemptCall() {
+          if (connected) return;
+          try {
+            const call = peer.call(otherId, stream);
+            if (call) {
+              call.on('stream', handleStream);
+              call.on('error', e => console.warn(e));
+            }
+          } catch(e) {
+            console.warn(e);
+          }
+        }
+
+        peer.on('open', () => {
+          statusEl.innerText = isCaller ? "Connecting to partner..." : "Ready. Receiving call...";
+
+          if (isCaller) {
+            attemptCall();
+            let count = 0;
+            callInterval = setInterval(() => {
+              count++;
+              if (!connected && count < 35) {
+                attemptCall();
+              } else {
+                clearInterval(callInterval);
+              }
+            }, 1500);
+          }
+        });
+
+        peer.on('call', call => {
+          call.answer(stream);
+          call.on('stream', handleStream);
+        });
+
+        peer.on('error', err => {
+          console.warn("PeerJS note:", err);
+        });
+      }).catch(err => {
+        console.warn("Media error, fallback to audio only:", err);
+        if (isVideo) {
+          // If camera fails, fallback to audio only
+          startStreaming({ audio: true, video: false });
+        } else {
+          statusEl.innerText = "Mic error: " + err.message;
         }
       });
+    }
 
-      peer.on('call', call => {
-        call.answer(stream);
-        call.on('stream', handleStream);
-      });
-
-      peer.on('error', err => {
-        console.warn("PeerJS note:", err);
-      });
-    }).catch(err => {
-      statusEl.innerText = "Microphone note: " + err.message;
-    });
+    startStreaming(mediaConstraints);
   </script>
 </body>
 </html>`);
