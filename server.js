@@ -248,6 +248,197 @@ app.post("/messages", async (req, res) => {
   }
 });
 
+// Active in-memory calls map for ultra-fast signaling
+const activeCalls = new Map();
+
+// 6. POST /calls/start - Start a new live call
+app.post("/calls/start", (req, res) => {
+  try {
+    const session = req.body;
+    if (!session || !session.callId || !session.callerId || !session.receiverId) {
+      return res.status(400).json({ error: "Invalid call session data" });
+    }
+
+    session.status = "ringing";
+    session.createdAt = Date.now();
+    activeCalls.set(session.callId, session);
+
+    console.log(`📞 Call Ringing: ${session.callerName} -> ${session.receiverName} (${session.callId})`);
+    res.json({ success: true, session });
+  } catch (err) {
+    console.error("Error starting call:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7. GET /calls/active - Poll for active incoming or connected calls
+app.get("/calls/active", (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(400).json({ error: "userId parameter required" });
+    }
+
+    // Clean up stale calls older than 45s
+    const now = Date.now();
+    for (const [id, call] of activeCalls.entries()) {
+      if (call.status === "ringing" && now - (call.createdAt || 0) > 45000) {
+        call.status = "ended";
+        activeCalls.delete(id);
+      }
+    }
+
+    let userCall = null;
+    for (const call of activeCalls.values()) {
+      if (
+        (call.receiverId === userId || call.callerId === userId) &&
+        (call.status === "ringing" || call.status === "connected")
+      ) {
+        userCall = call;
+        break;
+      }
+    }
+
+    res.json({ success: true, activeCall: userCall || null });
+  } catch (err) {
+    console.error("Error getting active call:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. POST /calls/answer - Answer an incoming call
+app.post("/calls/answer", (req, res) => {
+  try {
+    const { callId } = req.body;
+    if (!callId) {
+      return res.status(400).json({ error: "callId required" });
+    }
+
+    let call = activeCalls.get(callId);
+    if (call) {
+      call.status = "connected";
+      call.startTime = Date.now();
+      activeCalls.set(callId, call);
+
+      console.log(`📞 Call Answered & Connected: ${callId}`);
+      return res.json({ success: true, session: call });
+    }
+
+    res.status(404).json({ error: "Call not found" });
+  } catch (err) {
+    console.error("Error answering call:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9. POST /calls/end - End or decline a call
+app.post("/calls/end", (req, res) => {
+  try {
+    const { callId, status } = req.body;
+    if (!callId) {
+      return res.status(400).json({ error: "callId required" });
+    }
+
+    const finalStatus = status === "declined" ? "declined" : "ended";
+    let call = activeCalls.get(callId);
+    if (call) {
+      call.status = finalStatus;
+      call.endedAt = Date.now();
+      activeCalls.set(callId, call);
+      setTimeout(() => activeCalls.delete(callId), 6000);
+    }
+
+    console.log(`📞 Call Terminated (${finalStatus}): ${callId}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error ending call:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 10. GET /call-room/:callId/:role - WebRTC 2-Way Live Voice Audio Room
+app.get("/call-room/:callId/:role", (req, res) => {
+  const { callId, role } = req.params;
+  const myPeerId = `artverse_${callId}_${role}`;
+  const otherPeerId = `artverse_${callId}_${role === "caller" ? "receiver" : "caller"}`;
+
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ArtVerse Voice Room</title>
+</head>
+<body style="background:#0b1120;color:#fff;font-family:system-ui,sans-serif;margin:0;padding:20px;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
+  <div style="text-align:center;">
+    <h3 style="margin:0 0 10px;color:#38bdf8;">ArtVerse Live Voice Channel</h3>
+    <p id="status" style="font-size:14px;color:#94a3b8;">Connecting secure audio...</p>
+    <audio id="remoteAudio" autoplay playsinline></audio>
+  </div>
+
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script>
+    const statusEl = document.getElementById("status");
+    const remoteAudio = document.getElementById("remoteAudio");
+    const myId = "${myPeerId}";
+    const otherId = "${otherPeerId}";
+    const isCaller = "${role}" === "caller";
+
+    navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false
+    }).then(stream => {
+      statusEl.innerText = "Microphone connected. Linking voice...";
+
+      const peer = new Peer(myId, {
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+          ]
+        }
+      });
+
+      peer.on('open', () => {
+        statusEl.innerText = isCaller ? "Calling partner..." : "Ready. Answering voice...";
+
+        if (isCaller) {
+          let attempts = 0;
+          const interval = setInterval(() => {
+            attempts++;
+            const call = peer.call(otherId, stream);
+            if (call) {
+              call.on('stream', remoteStream => {
+                remoteAudio.srcObject = remoteStream;
+                remoteAudio.play().catch(e => console.log(e));
+                statusEl.innerText = "✓ Voice Connected! Speak now.";
+                clearInterval(interval);
+              });
+            }
+            if (attempts > 30) clearInterval(interval);
+          }, 1500);
+        }
+      });
+
+      peer.on('call', call => {
+        call.answer(stream);
+        call.on('stream', remoteStream => {
+          remoteAudio.srcObject = remoteStream;
+          remoteAudio.play().catch(e => console.log(e));
+          statusEl.innerText = "✓ Voice Connected! Speak now.";
+        });
+      });
+
+      peer.on('error', err => {
+        console.warn("PeerJS note:", err);
+      });
+    }).catch(err => {
+      statusEl.innerText = "Mic error: " + err.message;
+    });
+  </script>
+</body>
+</html>`);
+});
+
 // Start Express server and connect to MongoDB
 initMongoDB().then(() => {
   app.listen(PORT, "0.0.0.0", () => {
