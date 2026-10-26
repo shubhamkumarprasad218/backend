@@ -296,11 +296,10 @@ const handleActiveCall = (req, res) => {
       const cCallerPid = (call.callerPersonalId || "").toString().trim().toLowerCase();
 
       if (
-        (cReceiverId === userId ||
-         cCallerId === userId ||
-         cReceiverPid === userId ||
-         cCallerPid === userId) &&
-        (call.status === "ringing" || call.status === "connected")
+        cReceiverId === userId ||
+        cCallerId === userId ||
+        cReceiverPid === userId ||
+        cCallerPid === userId
       ) {
         userCall = call;
         break;
