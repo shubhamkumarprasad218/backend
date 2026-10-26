@@ -401,7 +401,19 @@ app.get("/call-room/:callId/:role", (req, res) => {
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       video: false
     }).then(stream => {
+      window.localStream = stream;
       statusEl.innerText = "Microphone active. Connecting...";
+
+      function handleMsg(e) {
+        try {
+          const d = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
+          if (d && d.type === "MUTE" && window.localStream) {
+            window.localStream.getAudioTracks().forEach(t => t.enabled = !d.muted);
+          }
+        } catch(err) {}
+      }
+      window.addEventListener("message", handleMsg);
+      document.addEventListener("message", handleMsg);
 
       const peer = new Peer(myId, {
         config: {
